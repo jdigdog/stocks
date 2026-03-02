@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -53,6 +54,14 @@ def build_relative(pv: pd.DataFrame, tickers: List[str], bench: str) -> Tuple[Se
     return SeriesOut(dates=dates, series=series), notes
 
 
+def _write_json(path: pd.io.common.FilePath, obj: dict) -> None:
+    from pathlib import Path
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
 def main() -> None:
     cfg = load_config()
     art = artifacts_dir(cfg)
@@ -69,6 +78,7 @@ def main() -> None:
     u_map = universe_map(cfg)
     all_tickers = sorted(set([t for ts in u_map.values() for t in ts] + [bench]))
 
+    # Prefer adj_close if available; fall back to close.
     field = "adj_close" if "adj_close" in prices.columns else "close"
     pv = _pivot(prices, all_tickers, field=field)
     if bench not in pv.columns:
@@ -87,12 +97,16 @@ def main() -> None:
             "series": {t: [None if pd.isna(v) else float(v) for v in pv_u[t].values] for t in pv_u.columns},
             "meta": {"universe": ukey, "price_field": field},
         }
-        (pub / "prices" / f"{ukey}.json").write_text(pd.io.json.dumps(price_payload), encoding="utf-8")
+        _write_json(pub / "prices" / f"{ukey}.json", price_payload)
 
         pv_rel = pv[[c for c in set(cols + [bench]) if c in pv.columns]].copy()
         rel_out, notes = build_relative(pv_rel, cols, bench)
-        rel_payload = {"dates": rel_out.dates, "series": rel_out.series, "meta": {"benchmark": bench, "notes": notes}}
-        (pub / "relative" / f"{ukey}_vs_{bench}.json").write_text(pd.io.json.dumps(rel_payload), encoding="utf-8")
+        rel_payload = {
+            "dates": rel_out.dates,
+            "series": rel_out.series,
+            "meta": {"benchmark": bench, "notes": notes},
+        }
+        _write_json(pub / "relative" / f"{ukey}_vs_{bench}.json", rel_payload)
 
     index = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
@@ -103,7 +117,8 @@ def main() -> None:
             "relative": {ukey: f"data/relative/{ukey}_vs_{bench}.json" for ukey in u_map},
         },
     }
-    (pub / "index.json").write_text(pd.io.json.dumps(index), encoding="utf-8")
+    _write_json(pub / "index.json", index)
+
     print(f"Wrote public data -> {pub}")
 
 
