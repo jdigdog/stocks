@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-from backend.scripts.utils import load_config, artifacts_dir, public_data_dir, tickers_from_cfg
+from .utils import load_config, artifacts_dir, public_data_dir, tickers_from_cfg
 
 
 @dataclass
@@ -90,7 +90,9 @@ def fetch_reddit(ticker: str, limit: int, client_id: str, client_secret: str, us
                 source="reddit",
                 url=f"https://www.reddit.com{permalink}" if permalink else "https://www.reddit.com",
                 title=d.get("title"),
-                created_at=datetime.fromtimestamp(d.get("created_utc", 0), tz=timezone.utc).isoformat() if d.get("created_utc") else None,
+                created_at=datetime.fromtimestamp(d.get("created_utc", 0), tz=timezone.utc).isoformat()
+                if d.get("created_utc")
+                else None,
                 snippet=(d.get("selftext") or "")[:280] if isinstance(d.get("selftext"), str) else None,
                 engagement={"score": d.get("score"), "num_comments": d.get("num_comments")},
             )
@@ -124,13 +126,21 @@ def fetch_tavily_news(ticker: str, limit: int, tavily_key: str, lookback_hours: 
 
 
 def score_rulebased(citations: List[Citation]) -> Tuple[float, str, float]:
-    pos = {"beat","beats","surge","soar","bull","upgrade","strong","record","win","growth"}
-    neg = {"miss","misses","drop","plunge","bear","downgrade","weak","fraud","lawsuit","cut"}
+    """
+    Deterministic scoring fallback (no LLM):
+      - keyword polarity: +1/-1
+      - small engagement weight
+      - outputs: score [-1,1], label, confidence [0,1]
+    """
+    pos = {"beat", "beats", "surge", "soar", "bull", "upgrade", "strong", "record", "win", "growth"}
+    neg = {"miss", "misses", "drop", "plunge", "bear", "downgrade", "weak", "fraud", "lawsuit", "cut"}
 
     if not citations:
         return 0.0, "neutral", 0.0
 
-    vals = []
+    import math
+
+    vals: List[float] = []
     for c in citations:
         txt = f"{c.title or ''} {c.snippet or ''}".lower()
         v = 0.0
@@ -138,16 +148,16 @@ def score_rulebased(citations: List[Citation]) -> Tuple[float, str, float]:
             v += 1.0
         if any(w in txt for w in neg):
             v -= 1.0
-        # engagement weight (small)
+
         e = c.engagement or {}
         eng = 0.0
-        for k in ["likes","score","num_comments","reshares"]:
+        for k in ["likes", "score", "num_comments", "reshares"]:
             if e.get(k) is not None:
                 try:
                     eng += float(e.get(k))
                 except Exception:
                     pass
-        w = 1.0 + (0.15 * (float(pd.Series([eng]).apply(lambda x: __import__("math").log1p(x)).iloc[0]) if eng > 0 else 0.0))
+        w = 1.0 + (0.15 * (math.log1p(eng) if eng > 0 else 0.0))
         vals.append(v * w)
 
     raw = sum(vals) / max(len(vals), 1)
@@ -172,7 +182,7 @@ def main() -> None:
     reddit_ua = _env("REDDIT_USER_AGENT") or "markets-analysis/1.0 (by u/yourusername)"
 
     tickers = tickers_from_cfg(cfg)
-    rows = []
+    rows: List[Dict[str, Any]] = []
     today = datetime.now(timezone.utc).date().isoformat()
 
     for t in tqdm(tickers, desc="Sentiment", ncols=100):
@@ -195,26 +205,27 @@ def main() -> None:
             except Exception:
                 pass
 
-        # keep latest-ish
         cites_sorted = sorted(cites, key=lambda c: c.created_at or "", reverse=True)[:max_cites]
         score, label, conf = score_rulebased(cites_sorted)
 
-        rows.append({
-            "date": today,
-            "ticker": t,
-            "score": score,
-            "label": label,
-            "confidence": conf,
-            "citations": [c.__dict__ for c in cites_sorted],
-            "sources": sorted(list({c.source for c in cites_sorted})),
-            "counts": {
-                "total": len(cites),
-                "used": len(cites_sorted),
-                "stocktwits": sum(1 for c in cites if c.source == "stocktwits"),
-                "reddit": sum(1 for c in cites if c.source == "reddit"),
-                "news": sum(1 for c in cites if c.source == "news"),
-            },
-        })
+        rows.append(
+            {
+                "date": today,
+                "ticker": t,
+                "score": score,
+                "label": label,
+                "confidence": conf,
+                "citations": [c.__dict__ for c in cites_sorted],
+                "sources": sorted(list({c.source for c in cites_sorted})),
+                "counts": {
+                    "total": len(cites),
+                    "used": len(cites_sorted),
+                    "stocktwits": sum(1 for c in cites if c.source == "stocktwits"),
+                    "reddit": sum(1 for c in cites if c.source == "reddit"),
+                    "news": sum(1 for c in cites if c.source == "news"),
+                },
+            }
+        )
 
     df = pd.DataFrame(rows)
     (art / "sentiment.parquet").parent.mkdir(parents=True, exist_ok=True)
