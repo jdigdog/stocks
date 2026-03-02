@@ -15,6 +15,7 @@ class Config:
 
 
 def repo_root() -> Path:
+    # backend/scripts/utils.py -> repo root
     return Path(__file__).resolve().parents[2]
 
 
@@ -34,12 +35,28 @@ def ensure_dir(p: Path) -> Path:
     return p
 
 
+def _safe_join_under_root(root: Path, rel: str) -> Path:
+    """
+    Join root + rel and ensure the resolved path remains under root.
+    Prevents accidental '../' escaping (common CI bug).
+    """
+    root = root.resolve()
+    target = (root / rel).resolve()
+    if target == root or root in target.parents:
+        return target
+    raise RuntimeError(f"Configured path escapes repo root: {rel} -> {target}")
+
+
 def artifacts_dir(cfg: Config) -> Path:
-    return ensure_dir(repo_root() / str(cfg.paths.get("artifacts_dir", "artifacts")))
+    root = repo_root()
+    rel = str(cfg.paths.get("artifacts_dir", "artifacts"))
+    return ensure_dir(_safe_join_under_root(root, rel))
 
 
 def public_data_dir(cfg: Config) -> Path:
-    return ensure_dir(repo_root() / str(cfg.paths.get("public_data_dir", "../frontend/public/data")))
+    root = repo_root()
+    rel = str(cfg.paths.get("public_data_dir", "frontend/public/data"))
+    return ensure_dir(_safe_join_under_root(root, rel))
 
 
 def tickers_from_cfg(cfg: Config) -> List[str]:
