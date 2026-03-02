@@ -1,0 +1,21 @@
+settings:
+  price_history_years: 2
+  benchmark_ticker: QQQ
+  timezone: America/Vancouver
+
+  sentiment_lookback_hours: 48
+  max_items_per_source: 40
+  max_citations_per_ticker_day: 12
+
+paths:
+  artifacts_dir: artifacts
+  public_data_dir: ../frontend/public/data
+
+universes:
+  qqq_core:
+    name: "QQQ Core"
+    tickers: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, AVGO, TSLA, COST]
+
+  indices:
+    name: "Benchmarks"
+    tickers: [QQQ, SPY, IWM, DIA]
