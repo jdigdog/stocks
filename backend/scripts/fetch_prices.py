@@ -15,18 +15,26 @@ def _start_date(years: int) -> str:
 
 
 def _normalize_download(df: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
-    if df.empty:
+    """
+    Normalize yfinance.download output to a long-form DataFrame:
+      date, ticker, open, high, low, close, adj_close, volume
+    Handles both MultiIndex column layouts:
+      (Field, Ticker) or (Ticker, Field)
+    """
+    if df is None or df.empty:
         return pd.DataFrame(columns=["date", "ticker", "open", "high", "low", "close", "adj_close", "volume"])
 
     if isinstance(df.columns, pd.MultiIndex):
-        # Handle (Field, Ticker) vs (Ticker, Field)
         fields = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
         lvl0 = set(df.columns.get_level_values(0))
         if lvl0 & fields:
+            # (Field, Ticker)
             stacked = df.stack(level=1).rename_axis(index=["date", "ticker"]).reset_index()
         else:
+            # (Ticker, Field)
             stacked = df.stack(level=0).rename_axis(index=["date", "ticker"]).reset_index()
     else:
+        # single ticker: flat columns
         stacked = df.reset_index().copy()
         stacked.insert(1, "ticker", tickers[0])
 
@@ -43,14 +51,16 @@ def _normalize_download(df: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
         }
     )
 
-    for c in ["date", "ticker", "open", "high", "low", "close", "adj_close", "volume"]:
+    # Ensure columns exist
+    required = ["date", "ticker", "open", "high", "low", "close", "adj_close", "volume"]
+    for c in required:
         if c not in stacked.columns:
             if c == "adj_close":
                 stacked[c] = pd.NA
             else:
                 raise RuntimeError(f"Missing expected column: {c}. Got {stacked.columns.tolist()}")
 
-    out = stacked[["date", "ticker", "open", "high", "low", "close", "adj_close", "volume"]].copy()
+    out = stacked[required].copy()
     out["date"] = pd.to_datetime(out["date"]).dt.tz_localize(None)
     out["ticker"] = out["ticker"].astype(str).str.upper()
     return out
@@ -68,23 +78,18 @@ def main() -> None:
     raw = yf.download(
         tickers=" ".join(tickers),
         start=_start_date(years),
-        auto_adjust=False,
+        auto_adjust=False,  # keep raw close + adj_close available
         group_by="ticker",
         threads=True,
         progress=False,
     )
 
     prices = _normalize_download(raw, tickers)
+
     out_path = out_dir / "prices.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     prices.to_parquet(out_path, index=False)
-    print(f"Wrote {len(prices):,} rows -> {out_path}")
 
-
-if __name__ == "__main__":
-    main()    out_path = out_dir / "prices.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    prices.to_parquet(out_path, index=False)
     print(f"Wrote {len(prices):,} rows -> {out_path}")
 
 
