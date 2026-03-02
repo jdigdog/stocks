@@ -9,7 +9,7 @@ settings:
 
 paths:
   artifacts_dir: artifacts
-  public_data_dir: ../frontend/public/data
+  public_data_dir: frontend/public/data
 
 universes:
   qqq_core:
