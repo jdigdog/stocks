@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from backend.scripts.utils import load_config, artifacts_dir, public_data_dir, universe_map
+from .utils import load_config, artifacts_dir, public_data_dir, universe_map
 
 
 @dataclass(frozen=True)
