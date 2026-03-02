@@ -15,12 +15,6 @@ def _start_date(years: int) -> str:
 
 
 def _normalize_download(df: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
-    """
-    Normalize yfinance.download output to a long-form DataFrame:
-      date, ticker, open, high, low, close, adj_close, volume
-    Handles both MultiIndex column layouts:
-      (Field, Ticker) or (Ticker, Field)
-    """
     if df is None or df.empty:
         return pd.DataFrame(columns=["date", "ticker", "open", "high", "low", "close", "adj_close", "volume"])
 
@@ -28,13 +22,10 @@ def _normalize_download(df: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
         fields = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
         lvl0 = set(df.columns.get_level_values(0))
         if lvl0 & fields:
-            # (Field, Ticker)
             stacked = df.stack(level=1).rename_axis(index=["date", "ticker"]).reset_index()
         else:
-            # (Ticker, Field)
             stacked = df.stack(level=0).rename_axis(index=["date", "ticker"]).reset_index()
     else:
-        # single ticker: flat columns
         stacked = df.reset_index().copy()
         stacked.insert(1, "ticker", tickers[0])
 
@@ -51,7 +42,6 @@ def _normalize_download(df: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
         }
     )
 
-    # Ensure columns exist
     required = ["date", "ticker", "open", "high", "low", "close", "adj_close", "volume"]
     for c in required:
         if c not in stacked.columns:
@@ -75,12 +65,21 @@ def main() -> None:
     if not tickers:
         raise SystemExit("No tickers found in universes_config.yml")
 
+    # Avoid yfinance sqlite lock issues by using a per-run cache folder.
+    tz_cache_dir = out_dir / "yfinance_tz_cache"
+    tz_cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        yf.set_tz_cache_location(str(tz_cache_dir))
+    except Exception:
+        # If yfinance version doesn't support it, continue; threads=False still helps.
+        pass
+
     raw = yf.download(
         tickers=" ".join(tickers),
         start=_start_date(years),
-        auto_adjust=False,  # keep raw close + adj_close available
+        auto_adjust=False,
         group_by="ticker",
-        threads=True,
+        threads=False,  # critical for avoiding sqlite "database is locked" in CI
         progress=False,
     )
 
