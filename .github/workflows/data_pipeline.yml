@@ -35,9 +35,9 @@ jobs:
           REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
         run: |
           python -m compileall backend/scripts
-          python backend/scripts/fetch_prices.py
-          python backend/scripts/build_public_data.py
-          python backend/scripts/fetch_sentiment_with_citations.py || true
+          python -m backend.scripts.fetch_prices
+          python -m backend.scripts.build_public_data
+          python -m backend.scripts.fetch_sentiment_with_citations || true
 
       - name: Commit generated public data
         run: |
