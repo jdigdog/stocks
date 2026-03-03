@@ -1,4 +1,4 @@
-name: Data pipeline (prices, benchmarking, sentiment)
+name: Build data + Deploy GitHub Pages
 
 "on":
   workflow_dispatch:
@@ -6,16 +6,23 @@ name: Data pipeline (prices, benchmarking, sentiment)
     - cron: "30 10 * * 1-5" # 10:30 UTC weekdays
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
-  build-data:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # -------- Data pipeline (Python) --------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -26,13 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
-      - name: Run pipeline (prices + benchmarking)
+      - name: Build prices + benchmarking artifacts
         run: |
           python -m compileall backend/scripts
           python -m backend.scripts.fetch_prices
           python -m backend.scripts.build_public_data
 
-      - name: Run sentiment (best-effort)
+      - name: Build sentiment artifacts (best-effort)
         env:
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
@@ -41,7 +48,7 @@ jobs:
         run: |
           python -m backend.scripts.fetch_sentiment_with_citations || true
 
-      - name: Ensure sentiment pointer exists (never 404)
+      - name: Ensure sentiment pointer exists (never 404 in build)
         run: |
           python - << 'PY'
           import json
@@ -51,39 +58,59 @@ jobs:
           base = Path("frontend/public/data/sentiment")
           base.mkdir(parents=True, exist_ok=True)
 
-          # If a day-file exists, point to newest. Otherwise, create an empty day-file and point to it.
           day_files = sorted([p for p in base.glob("*.json") if p.name != "latest.json"], reverse=True)
           if not day_files:
-              today = datetime.now(timezone.utc).date().isoformat()
-              day_path = base / f"{today}.json"
-              day_path.write_text(json.dumps({
-                  "generated_at": datetime.now(timezone.utc).isoformat(),
-                  "date": today,
-                  "items": []
-              }, separators=(",", ":")), encoding="utf-8")
-              day_files = [day_path]
+            today = datetime.now(timezone.utc).date().isoformat()
+            day_path = base / f"{today}.json"
+            day_path.write_text(json.dumps({
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "date": today,
+              "items": []
+            }, separators=(",", ":")), encoding="utf-8")
+            day_files = [day_path]
 
           latest = day_files[0]
           (base / "latest.json").write_text(json.dumps({
-              "latest": f"data/sentiment/{latest.name}"
+            "latest": f"data/sentiment/{latest.name}"
           }, separators=(",", ":")), encoding="utf-8")
 
           print("Sentiment latest pointer ->", f"data/sentiment/{latest.name}")
-          print("Files in sentiment dir:", [p.name for p in sorted(base.glob("*.json"))])
+          print("Sentiment files:", [p.name for p in sorted(base.glob('*.json'))])
           PY
 
-      - name: Verify public data exists
+      - name: Verify public data present for UI build
         run: |
           test -f frontend/public/data/index.json
           test -f frontend/public/data/sentiment/latest.json
-          ls -la frontend/public/data || true
-          ls -la frontend/public/data/sentiment || true
+          ls -la frontend/public/data
+          ls -la frontend/public/data/sentiment
 
-      - name: Commit generated public data
+      # -------- UI build + Pages deploy (Node) --------
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install UI deps
+        working-directory: frontend
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add frontend/public/data
-          git status --porcelain
-          git commit -m "Update public data" || echo "No changes"
-          git push
+          npm ci || npm install
+
+      - name: Build UI
+        working-directory: frontend
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: |
+          npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/dist
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
