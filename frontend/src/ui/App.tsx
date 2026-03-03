@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import Universe from "./pages/Universe";
 import Ticker from "./pages/Ticker";
 import Watchlist from "./pages/Watchlist";
+import RelativePerformance from "./pages/RelativePerformance";
 
 function Nav() {
   const link = (to: string, label: string) => (
@@ -24,11 +25,14 @@ function Nav() {
           <div className="w-8 h-8 rounded-2xl bg-gradient-to-br from-zinc-200 to-zinc-600" />
           <div>
             <div className="font-semibold leading-tight">Markets Analysis</div>
-            <div className="text-xs text-zinc-400 -mt-0.5">Pages-first • deterministic benchmarking • cited sentiment</div>
+            <div className="text-xs text-zinc-400 -mt-0.5">
+              Pages-first • deterministic benchmarking • cited sentiment
+            </div>
           </div>
         </div>
         <div className="flex gap-2">
           {link("/", "Dashboard")}
+          {link("/relative", "Relative")}
           {link("/watchlist", "Watchlist")}
         </div>
       </div>
@@ -43,6 +47,7 @@ export default function App() {
       <div className="max-w-6xl mx-auto px-4 py-6">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/relative" element={<RelativePerformance />} />
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/u/:universeId" element={<Universe />} />
           <Route path="/t/:ticker" element={<Ticker />} />
