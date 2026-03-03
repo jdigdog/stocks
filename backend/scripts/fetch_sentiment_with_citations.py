@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
@@ -27,24 +29,32 @@ def _env(name: str) -> str | None:
     return v.strip() if v else None
 
 
+def _write_json(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
 def fetch_stocktwits(ticker: str, limit: int) -> List[Citation]:
-    # Stocktwits docs: https://api-docs.stocktwits.com/
+    """
+    Stocktwits symbol stream. No key required for basic access but may rate-limit.
+    Docs: https://api-docs.stocktwits.com/
+    """
     url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
     r = requests.get(url, timeout=30)
     if r.status_code != 200:
         return []
+
     data = r.json()
     out: List[Citation] = []
     for m in (data.get("messages") or [])[:limit]:
-        created = m.get("created_at")
-        body = m.get("body")
         msg_id = m.get("id")
+        body = m.get("body")
         out.append(
             Citation(
                 source="stocktwits",
-                url=f"https://stocktwits.com/message/{msg_id}",
+                url=f"https://stocktwits.com/message/{msg_id}" if msg_id is not None else "https://stocktwits.com",
                 title=None,
-                created_at=created,
+                created_at=m.get("created_at"),
                 snippet=body[:280] if isinstance(body, str) else None,
                 engagement={
                     "likes": (m.get("likes") or {}).get("total"),
@@ -56,7 +66,10 @@ def fetch_stocktwits(ticker: str, limit: int) -> List[Citation]:
 
 
 def fetch_reddit(ticker: str, limit: int, client_id: str, client_secret: str, user_agent: str) -> List[Citation]:
-    # Reddit Data API docs: https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki
+    """
+    Reddit OAuth client-credentials search.
+    NOTE: Use only in compliance with Reddit policies and your approved access.
+    """
     token_url = "https://www.reddit.com/api/v1/access_token"
     auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
     tr = requests.post(
@@ -71,16 +84,17 @@ def fetch_reddit(ticker: str, limit: int, client_id: str, client_secret: str, us
     token = tr.json().get("access_token")
     if not token:
         return []
-    headers = {"Authorization": f"bearer {token}", "User-Agent": user_agent}
 
+    headers = {"Authorization": f"bearer {token}", "User-Agent": user_agent}
     q = f'("{ticker}" OR "${ticker}") (stock OR shares OR earnings OR guidance)'
     url = "https://oauth.reddit.com/search"
     params = {"q": q, "sort": "new", "limit": limit, "t": "week", "restrict_sr": False, "type": "link"}
+
     r = requests.get(url, headers=headers, params=params, timeout=30)
     if r.status_code != 200:
         return []
-    data = r.json()
 
+    data = r.json()
     out: List[Citation] = []
     for child in ((data.get("data") or {}).get("children") or [])[:limit]:
         d = child.get("data") or {}
@@ -105,11 +119,12 @@ def fetch_tavily_news(ticker: str, limit: int, tavily_key: str, lookback_hours: 
     since = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).date().isoformat()
     q = f"{ticker} stock news since:{since}"
     payload = {"api_key": tavily_key, "query": q, "max_results": limit, "include_answer": False, "include_raw_content": False}
+
     r = requests.post(url, json=payload, timeout=45)
     if r.status_code != 200:
         return []
-    data = r.json()
 
+    data = r.json()
     out: List[Citation] = []
     for item in (data.get("results") or [])[:limit]:
         out.append(
@@ -127,18 +142,18 @@ def fetch_tavily_news(ticker: str, limit: int, tavily_key: str, lookback_hours: 
 
 def score_rulebased(citations: List[Citation]) -> Tuple[float, str, float]:
     """
-    Deterministic scoring fallback (no LLM):
+    Deterministic fallback scoring (no LLM):
       - keyword polarity: +1/-1
       - small engagement weight
       - outputs: score [-1,1], label, confidence [0,1]
     """
+    import math
+
     pos = {"beat", "beats", "surge", "soar", "bull", "upgrade", "strong", "record", "win", "growth"}
     neg = {"miss", "misses", "drop", "plunge", "bear", "downgrade", "weak", "fraud", "lawsuit", "cut"}
 
     if not citations:
         return 0.0, "neutral", 0.0
-
-    import math
 
     vals: List[float] = []
     for c in citations:
@@ -163,7 +178,7 @@ def score_rulebased(citations: List[Citation]) -> Tuple[float, str, float]:
     raw = sum(vals) / max(len(vals), 1)
     score = float(max(-1.0, min(1.0, raw / 2.0)))
     label = "bullish" if score > 0.15 else "bearish" if score < -0.15 else "neutral"
-    confidence = float(min(1.0, 0.15 + 0.85 * (min(1.0, len(citations) / 25.0))))
+    confidence = float(min(1.0, 0.15 + 0.85 * min(1.0, len(citations) / 25.0)))
     return score, label, confidence
 
 
@@ -182,23 +197,38 @@ def main() -> None:
     reddit_ua = _env("REDDIT_USER_AGENT") or "markets-analysis/1.0 (by u/yourusername)"
 
     tickers = tickers_from_cfg(cfg)
-    rows: List[Dict[str, Any]] = []
     today = datetime.now(timezone.utc).date().isoformat()
+
+    sentiment_dir = pub / "sentiment"
+    sentiment_dir.mkdir(parents=True, exist_ok=True)
+
+    rows: List[Dict[str, Any]] = []
+
+    st_ok = 0
+    st_total = 0
 
     for t in tqdm(tickers, desc="Sentiment", ncols=100):
         cites: List[Citation] = []
 
+        # Stocktwits (always attempted)
+        st_total += 1
         try:
-            cites.extend(fetch_stocktwits(t, limit=max_items))
+            st_c = fetch_stocktwits(t, limit=max_items)
+            if st_c:
+                st_ok += 1
+            cites.extend(st_c)
         except Exception:
+            # swallow per-ticker failures
             pass
 
+        # Reddit (optional)
         if reddit_id and reddit_secret:
             try:
                 cites.extend(fetch_reddit(t, limit=max_items, client_id=reddit_id, client_secret=reddit_secret, user_agent=reddit_ua))
             except Exception:
                 pass
 
+        # News (optional)
         if tavily_key:
             try:
                 cites.extend(fetch_tavily_news(t, limit=max_items, tavily_key=tavily_key, lookback_hours=lookback))
@@ -227,19 +257,20 @@ def main() -> None:
             }
         )
 
+    # Persist parquet (optional internal artifact)
     df = pd.DataFrame(rows)
     (art / "sentiment.parquet").parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(art / "sentiment.parquet", index=False)
 
+    # Always write public JSON + latest pointer (even if empty)
     out = {"generated_at": pd.Timestamp.utcnow().isoformat(), "date": today, "items": df.to_dict(orient="records")}
-    out_path = pub / "sentiment" / f"{today}.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(pd.io.json.dumps(out), encoding="utf-8")
+    day_path = sentiment_dir / f"{today}.json"
+    _write_json(day_path, out)
+    _write_json(sentiment_dir / "latest.json", {"latest": f"data/sentiment/{today}.json"})
 
-    # pointer for static hosting
-    (pub / "sentiment" / "latest.json").write_text(pd.io.json.dumps({"latest": f"data/sentiment/{today}.json"}), encoding="utf-8")
-
-    print(f"Wrote sentiment -> {out_path}")
+    print(f"[sentiment] wrote: {day_path}")
+    print(f"[sentiment] latest pointer: data/sentiment/{today}.json")
+    print(f"[sentiment] stocktwits success: {st_ok}/{st_total} tickers (non-empty response)")
 
 
 if __name__ == "__main__":
